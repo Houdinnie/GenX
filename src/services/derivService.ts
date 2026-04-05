@@ -189,34 +189,30 @@ export class DerivService {
   public executeTrade(type: 'buy' | 'sell', symbol: string, lotSize: number, sl?: number, tp?: number) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       const derivSymbol = this.mapSymbol(symbol);
-      const parameters: any = {
-        amount: lotSize,
-        basis: 'payout', // Default for synthetic indices in some contexts, but 'stake' or 'amount' is common
-        contract_type: type === 'buy' ? 'CALL' : 'PUT',
-        currency: 'USD',
-        duration: 1,
-        duration_unit: 'm',
-        symbol: derivSymbol
-      };
-
-      // For synthetic indices, 'buy' is often used with 'parameters'
-      this.ws.send(JSON.stringify({
+      
+      // For Deriv, when using 'buy' with 'parameters' and 'basis: stake', 
+      // the 'price' field in the 'buy' request should be the maximum price you are willing to pay.
+      // For a stake-based contract, this is usually the stake amount itself.
+      const buyRequest = {
         buy: 1,
-        price: 100, // This is a placeholder, real trading needs 'proposal' first or 'buy' with specific params
+        price: lotSize, 
         parameters: {
           contract_type: type === 'buy' ? 'CALL' : 'PUT',
           symbol: derivSymbol,
           amount: lotSize,
           basis: 'stake',
           currency: 'USD',
-          limit_order: {
-            stop_loss: sl,
-            take_profit: tp
-          }
+          duration: 1,
+          duration_unit: 'm', // Default to 1 minute for now
+          limit_order: (sl || tp) ? {
+            stop_loss: sl || undefined,
+            take_profit: tp || undefined
+          } : undefined
         }
-      }));
+      };
 
-      this.onLog(`[Account: ${this.appId}] Executing ${type.toUpperCase()} on ${symbol} (Lot: ${lotSize})`, 'success');
+      this.ws.send(JSON.stringify(buyRequest));
+      this.onLog(`[Account: ${this.appId}] Sent ${type.toUpperCase()} order for ${symbol} (Stake: ${lotSize})`, 'info');
     } else {
       this.onLog(`[Account: ${this.appId}] Failed to execute: Not connected`, 'error');
     }

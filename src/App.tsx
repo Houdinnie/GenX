@@ -36,7 +36,9 @@ import {
   ChevronDown,
   Users,
   Plus,
-  Trash2
+  Trash2,
+  Lock,
+  Edit2
 } from 'lucide-react';
 import { 
   ResponsiveContainer, 
@@ -81,10 +83,10 @@ export default function App() {
     return {
       isConnected: false,
       isTrading: false,
-      balance: 10542.50,
-      equity: 10542.50,
+      balance: 0,
+      equity: 0,
       activeSymbol: 'Volatility 75 Index',
-      highWaterMark: 10542.50,
+      highWaterMark: 0,
       lastResetTime: new Date().setUTCHours(0, 0, 0, 0),
       isHalted: false,
       instrumentConfigs: (() => {
@@ -133,9 +135,14 @@ export default function App() {
       apiToken: savedApiToken || '',
       accounts: JSON.parse(localStorage.getItem('deriv_accounts') || '[]'),
       soundEnabled: true,
-      highPerformanceMode: false
+      highPerformanceMode: false,
+      activeAccountId: 'main',
+      isLocked: true,
+      pin: localStorage.getItem('bot_pin') || '1234'
     };
   });
+
+  const [isBalanceLoading, setIsBalanceLoading] = useState(true);
 
   const [marketData, setMarketData] = useState<MarketData[]>(generateMockTicks(50, 750000));
   const [trades, setTrades] = useState<Trade[]>([
@@ -193,6 +200,9 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'strategy' | 'risk' | 'logs' | 'history' | 'analysis' | 'backtest' | 'accounts'>('dashboard');
   const [editingInstrument, setEditingInstrument] = useState<string>(botState.activeSymbol);
   const [showSettings, setShowSettings] = useState(false);
+  const [showSymbolSelector, setShowSymbolSelector] = useState(false);
+  const [showAccountSelector, setShowAccountSelector] = useState(false);
+  const [pinInput, setPinInput] = useState('');
   const [settingsTab, setSettingsTab] = useState<'broker' | 'interface' | 'global'>('broker');
   const [confirmingOrder, setConfirmingOrder] = useState<'buy' | 'sell' | null>(null);
   const [backtestState, setBacktestState] = useState({
@@ -210,6 +220,11 @@ export default function App() {
     maxPnL: ''
   });
 
+  const [editingTradeId, setEditingTradeId] = useState<string | null>(null);
+  const [editSL, setEditSL] = useState<number>(0);
+  const [editTP, setEditTP] = useState<number>(0);
+  const [showEditConfirm, setShowEditConfirm] = useState(false);
+
   const engineRef = useRef<Record<string, APAEngine>>({});
   const derivServiceRef = useRef<DerivService | null>(null);
   const accountServicesRef = useRef<Record<string, DerivService>>({});
@@ -220,6 +235,17 @@ export default function App() {
     if (botState.appId) localStorage.setItem('deriv_app_id', botState.appId);
     if (botState.apiToken) localStorage.setItem('deriv_api_token', botState.apiToken);
   }, [botState.appId, botState.apiToken]);
+
+  useEffect(() => {
+    localStorage.setItem('deriv_accounts', JSON.stringify(botState.accounts));
+  }, [botState.accounts]);
+
+  useEffect(() => {
+    localStorage.setItem('deriv_instrument_configs', JSON.stringify(botState.instrumentConfigs));
+  }, [botState.instrumentConfigs]);
+
+  // Automated Trading Logic
+  // Moved after addLog and currentEngine declaration to avoid TDZ issues
 
   const currentEngine = useMemo(() => {
     if (!engineRef.current[botState.activeSymbol]) {
@@ -331,6 +357,76 @@ export default function App() {
   const addLog = useCallback((msg: string, type: 'info' | 'success' | 'warning' | 'error' = 'info') => {
     setLogs(prev => [{ time: format(new Date(), 'HH:mm:ss'), msg, type }, ...prev].slice(0, 50));
   }, []);
+
+  // Automated Trading Logic
+  useEffect(() => {
+    if (!botState.isTrading) return;
+
+    const analysis = currentEngine.getAnalysis();
+    if (!analysis || !analysis.neuralNetwork) return;
+
+    const bias = analysis.neuralNetwork.bias;
+    const confidence = analysis.neuralNetwork.confidence;
+
+    // Check if we already have an open trade for this symbol
+    const hasOpenTrade = trades.some(t => t.symbol === botState.activeSymbol && t.status === 'open');
+
+    // Simple cooldown: don't trade more than once every 5 minutes per symbol automatically
+    const lastTrade = trades.find(t => t.symbol === botState.activeSymbol);
+    const cooldownPeriod = 5 * 60 * 1000;
+    const isCoolingDown = lastTrade && (Date.now() - lastTrade.openTime < cooldownPeriod);
+
+    if (confidence > 0.90 && (bias === 'bullish' || bias === 'bearish')) {
+      if (hasOpenTrade) {
+        // Only log this occasionally to avoid spam
+        if (Math.random() > 0.99) addLog(`Signal detected for ${botState.activeSymbol}, but position already open.`, 'info');
+        return;
+      }
+      
+      if (isCoolingDown) {
+        if (Math.random() > 0.99) addLog(`Signal detected for ${botState.activeSymbol}, but in cooldown period.`, 'info');
+        return;
+      }
+
+      const type = bias === 'bullish' ? 'buy' : 'sell';
+      const config = botState.instrumentConfigs[botState.activeSymbol];
+      const lotSize = config.lotSizeMethod === 'fixed' ? config.fixedLotSize : 0.1;
+      
+      const currentPrice = marketData[marketData.length - 1]?.price || 0;
+      const sl = type === 'buy' ? currentPrice - config.stopLossPips : currentPrice + config.stopLossPips;
+      const tp = type === 'buy' ? currentPrice + config.takeProfitPips : currentPrice - config.takeProfitPips;
+
+      addLog(`Automated Signal: ${type.toUpperCase()} ${botState.activeSymbol} (Conf: ${(confidence * 100).toFixed(0)}%)`, 'success');
+      
+      const newTrade: Trade = {
+        id: Math.random().toString(36).substr(2, 9),
+        symbol: botState.activeSymbol,
+        type,
+        entryPrice: currentPrice,
+        stopLoss: sl,
+        takeProfit: tp,
+        lotSize,
+        status: 'open',
+        pnl: 0,
+        openTime: Date.now(),
+        tpAlertEnabled: true
+      };
+
+      setTrades(prev => [newTrade, ...prev]);
+      
+      // Real execution if connected
+      if (botState.activeAccountId === 'main') {
+        if (derivServiceRef.current) {
+          derivServiceRef.current.executeTrade(type, botState.activeSymbol, lotSize, sl, tp);
+        }
+      } else {
+        const acc = botState.accounts.find(a => a.id === botState.activeAccountId);
+        if (acc && accountServicesRef.current[acc.id]) {
+          accountServicesRef.current[acc.id].executeTrade(type, botState.activeSymbol, lotSize, sl, tp);
+        }
+      }
+    }
+  }, [botState.isTrading, botState.activeSymbol, botState.instrumentConfigs, marketData, currentEngine, trades, botState.activeAccountId, botState.accounts, addLog]);
 
   // Daily Drawdown Reset & Halt Logic
   useEffect(() => {
@@ -536,15 +632,22 @@ export default function App() {
     setTrades(prev => [newTrade, ...prev]);
     addLog(`Manual ${type.toUpperCase()} order placed at ${currentPrice.toFixed(2)}`, 'success');
 
-    // Execute on main account
-    if (derivServiceRef.current) {
-      derivServiceRef.current.executeTrade(type, botState.activeSymbol, manualOrder.lotSize, sl, tp);
+    // Execute on the selected active account
+    if (botState.activeAccountId === 'main') {
+      if (derivServiceRef.current) {
+        derivServiceRef.current.executeTrade(type, botState.activeSymbol, manualOrder.lotSize, sl, tp);
+      } else {
+        addLog('Main account not connected', 'error');
+      }
+    } else {
+      const subAccount = botState.accounts.find(a => a.id === botState.activeAccountId);
+      const service = accountServicesRef.current[botState.activeAccountId];
+      if (service) {
+        service.executeTrade(type, botState.activeSymbol, manualOrder.lotSize, sl, tp);
+      } else {
+        addLog(`Sub-account ${subAccount?.name || botState.activeAccountId} not connected`, 'error');
+      }
     }
-
-    // Execute on sub-accounts
-    (Object.values(accountServicesRef.current) as DerivService[]).forEach(service => {
-      service.executeTrade(type, botState.activeSymbol, manualOrder.lotSize, sl, tp);
-    });
   };
 
   const toggleTpAlert = (tradeId: string) => {
@@ -568,6 +671,10 @@ export default function App() {
         generateTradeSummary(closedTrade).then(summary => {
           setTrades(currentTrades => currentTrades.map(ct => ct.id === t.id ? { ...ct, summary } : ct));
         });
+
+        // Trigger learning mechanism
+        const engine = engineRef.current[t.symbol];
+        if (engine) engine.learn(closedTrade);
 
         return closedTrade;
       }
@@ -686,6 +793,9 @@ export default function App() {
     localStorage.setItem('deriv_instrument_configs', JSON.stringify(botState.instrumentConfigs));
   }, [botState.instrumentConfigs]);
 
+  const [showAddAccount, setShowAddAccount] = useState(false);
+  const [newAccountData, setNewAccountData] = useState({ name: '', appId: '', apiToken: '' });
+
   const addAccount = (name: string, appId: string, apiToken: string) => {
     const newAccount: Account = {
       id: Math.random().toString(36).substr(2, 9),
@@ -698,6 +808,30 @@ export default function App() {
     };
     setBotState(prev => ({ ...prev, accounts: [...prev.accounts, newAccount] }));
     addLog(`Account ${name} added`, 'success');
+    
+    // Connect immediately
+    const service = new DerivService(
+      appId,
+      apiToken,
+      () => {},
+      () => {},
+      (isConnected) => {
+        setBotState(prev => ({
+          ...prev,
+          accounts: prev.accounts.map(a => a.id === newAccount.id ? { ...a, status: isConnected ? 'connected' : 'disconnected' } : a)
+        }));
+      },
+      (msg, type) => addLog(`[${name}] ${msg}`, type),
+      (balance) => {
+        setBotState(prev => ({
+          ...prev,
+          accounts: prev.accounts.map(a => a.id === newAccount.id ? { ...a, balance } : a)
+        }));
+        if (botState.activeAccountId === newAccount.id) setIsBalanceLoading(false);
+      }
+    );
+    service.connect();
+    accountServicesRef.current[newAccount.id] = service;
   };
 
   const removeAccount = (id: string) => {
@@ -739,7 +873,10 @@ export default function App() {
       handleDerivHistory,
       handleDerivStatus,
       addLog,
-      (balance) => setBotState(prev => ({ ...prev, balance, equity: balance }))
+      (balance) => {
+        setBotState(prev => ({ ...prev, balance, equity: balance }));
+        setIsBalanceLoading(false);
+      }
     );
     derivServiceRef.current.connect();
     derivServiceRef.current.fetchHistory(botState.activeSymbol, 50);
@@ -764,6 +901,7 @@ export default function App() {
             ...prev,
             accounts: prev.accounts.map(a => a.id === acc.id ? { ...a, balance } : a)
           }));
+          if (botState.activeAccountId === acc.id) setIsBalanceLoading(false);
         }
       );
       service.connect();
@@ -787,15 +925,159 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#0a0a0c] text-gray-300 font-sans selection:bg-blue-500/30">
+      {/* PIN Login Screen */}
+      <AnimatePresence>
+        {botState.isLocked && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[200] flex items-center justify-center bg-[#0a0a0c] p-6"
+          >
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              className="w-full max-w-sm space-y-8 text-center"
+            >
+              <div className="flex flex-col items-center gap-4">
+                <div className="w-16 h-16 bg-blue-600 rounded-2xl flex items-center justify-center shadow-2xl shadow-blue-600/20">
+                  <Lock className="w-8 h-8 text-white" />
+                </div>
+                <div>
+                  <h2 className="text-xl font-bold text-white uppercase tracking-widest">Security Lock</h2>
+                  <p className="text-xs text-gray-500 mt-1">Enter your 4-digit PIN to access Apex-Syn</p>
+                </div>
+              </div>
+
+              <div className="flex justify-center gap-3">
+                {[0, 1, 2, 3].map(i => (
+                  <div 
+                    key={i} 
+                    className={cn(
+                      "w-12 h-16 rounded-xl border-2 flex items-center justify-center text-xl font-bold transition-all",
+                      pinInput.length > i ? "border-blue-500 bg-blue-500/10 text-white" : "border-white/5 bg-white/5 text-gray-700"
+                    )}
+                  >
+                    {pinInput.length > i ? '•' : ''}
+                  </div>
+                ))}
+              </div>
+
+              <div className="grid grid-cols-3 gap-4 max-w-[280px] mx-auto">
+                {[1, 2, 3, 4, 5, 6, 7, 8, 9, 'C', 0, '←'].map(key => (
+                  <button
+                    key={key}
+                    onClick={() => {
+                      if (key === 'C') setPinInput('');
+                      else if (key === '←') setPinInput(prev => prev.slice(0, -1));
+                      else if (pinInput.length < 4) {
+                        const newPin = pinInput + key;
+                        setPinInput(newPin);
+                        if (newPin === botState.pin) {
+                          setTimeout(() => {
+                            setBotState(prev => ({ ...prev, isLocked: false }));
+                            addLog('Security access granted', 'success');
+                          }, 300);
+                        } else if (newPin.length === 4) {
+                          setTimeout(() => {
+                            setPinInput('');
+                            addLog('Invalid Security PIN', 'error');
+                          }, 300);
+                        }
+                      }
+                    }}
+                    className="h-14 rounded-xl bg-white/5 hover:bg-white/10 border border-white/5 text-lg font-bold text-white transition-all active:scale-95"
+                  >
+                    {key}
+                  </button>
+                ))}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Header */}
       <header className="h-14 border-b border-white/5 bg-[#0d0d0f] flex items-center justify-between px-6 sticky top-0 z-50">
-        <div className="flex items-center gap-3">
-          <div className="w-8 h-8 bg-blue-600 rounded flex items-center justify-center">
-            <Zap className="w-5 h-5 text-white fill-current" />
+        <div className="flex items-center gap-8">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 bg-blue-600 rounded flex items-center justify-center">
+              <Zap className="w-5 h-5 text-white fill-current" />
+            </div>
+            <div>
+              <h1 className="text-sm font-bold text-white tracking-wider uppercase">Apex-Syn</h1>
+              <p className="text-[10px] text-gray-500 font-mono">v1.0.4-beta • Synthetic Engine</p>
+            </div>
           </div>
-          <div>
-            <h1 className="text-sm font-bold text-white tracking-wider uppercase">Apex-Syn</h1>
-            <p className="text-[10px] text-gray-500 font-mono">v1.0.4-beta • Synthetic Engine</p>
+
+          <div className="h-6 w-px bg-white/10 hidden md:block" />
+
+          {/* Active Account Indicator/Selector */}
+          <div className="relative hidden md:block">
+            <button 
+              onClick={() => setShowAccountSelector(!showAccountSelector)}
+              className="flex items-center gap-3 px-3 py-1.5 bg-white/5 border border-white/10 rounded-lg hover:bg-white/10 transition-all"
+            >
+              <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+              <div className="text-left">
+                <div className="text-[9px] font-bold text-gray-500 uppercase leading-none mb-0.5">Active Account</div>
+                <div className="text-[10px] font-bold text-white uppercase tracking-tight">
+                  {botState.activeAccountId === 'main' ? 'Main Account' : botState.accounts.find(a => a.id === botState.activeAccountId)?.name || 'Unknown'}
+                </div>
+              </div>
+              <ChevronDown className="w-3 h-3 text-gray-500" />
+            </button>
+            
+            <AnimatePresence>
+              {showAccountSelector && (
+                <>
+                  <div className="fixed inset-0 z-40" onClick={() => setShowAccountSelector(false)} />
+                  <motion.div 
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 10 }}
+                    className="absolute top-full left-0 mt-2 w-56 bg-[#111114] border border-white/10 rounded-xl shadow-2xl z-50 overflow-hidden"
+                  >
+                    <div className="p-2 border-b border-white/5 bg-white/5">
+                      <span className="text-[9px] font-bold text-gray-500 uppercase tracking-widest px-2">Select Trading Target</span>
+                    </div>
+                    <button 
+                      onClick={() => {
+                        setBotState(prev => ({ ...prev, activeAccountId: 'main' }));
+                        setIsBalanceLoading(botState.balance === 0);
+                        setShowAccountSelector(false);
+                        addLog('Active trading account switched to: Main', 'info');
+                      }}
+                      className={cn(
+                        "w-full text-left px-4 py-3 text-[10px] font-bold transition-all flex items-center justify-between border-b border-white/5",
+                        botState.activeAccountId === 'main' ? "bg-blue-600/10 text-blue-400" : "text-gray-400 hover:text-white hover:bg-white/5"
+                      )}
+                    >
+                      <span>Main Account</span>
+                      {botState.activeAccountId === 'main' && <Check className="w-3 h-3" />}
+                    </button>
+                    {botState.accounts.map(acc => (
+                      <button 
+                        key={acc.id}
+                        onClick={() => {
+                          setBotState(prev => ({ ...prev, activeAccountId: acc.id }));
+                          setIsBalanceLoading(acc.balance === 0);
+                          setShowAccountSelector(false);
+                          addLog(`Active trading account switched to: ${acc.name}`, 'info');
+                        }}
+                        className={cn(
+                          "w-full text-left px-4 py-3 text-[10px] font-bold transition-all flex items-center justify-between border-b border-white/5 last:border-0",
+                          botState.activeAccountId === acc.id ? "bg-blue-600/10 text-blue-400" : "text-gray-400 hover:text-white hover:bg-white/5"
+                        )}
+                      >
+                        <span>{acc.name}</span>
+                        {botState.activeAccountId === acc.id && <Check className="w-3 h-3" />}
+                      </button>
+                    ))}
+                  </motion.div>
+                </>
+              )}
+            </AnimatePresence>
           </div>
         </div>
 
@@ -803,27 +1085,53 @@ export default function App() {
           <div className="flex items-center gap-4 px-4 py-1.5 bg-white/5 rounded-full border border-white/5">
             <div className="flex items-center gap-2">
               <Wallet className="w-3.5 h-3.5 text-gray-500" />
-              <span className="text-xs font-mono text-blue-400">${botState.balance.toLocaleString()}</span>
+              <span className="text-xs font-mono text-blue-400">
+                {isBalanceLoading && botState.isConnected ? 'Loading...' : 
+                  `$${(botState.activeAccountId === 'main' ? botState.balance : (botState.accounts.find(a => a.id === botState.activeAccountId)?.balance || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}`}
+              </span>
             </div>
             <div className="w-px h-3 bg-white/10" />
             <div className="flex items-center gap-2">
               <Activity className="w-3.5 h-3.5 text-gray-500" />
-              <span className="text-xs font-mono text-emerald-400">${botState.equity.toLocaleString()}</span>
+              <span className="text-xs font-mono text-emerald-400">
+                {isBalanceLoading && botState.isConnected ? 'Loading...' : 
+                  `$${(botState.activeAccountId === 'main' ? botState.equity : (botState.accounts.find(a => a.id === botState.activeAccountId)?.balance || 0)).toLocaleString(undefined, { minimumFractionDigits: 2 })}`}
+              </span>
             </div>
           </div>
 
-          <button 
-            onClick={toggleTrading}
-            className={cn(
-              "flex items-center gap-2 px-4 py-1.5 rounded-md text-xs font-bold transition-all uppercase tracking-widest",
-              botState.isTrading 
-                ? "bg-red-500/10 text-red-500 border border-red-500/20 hover:bg-red-500/20" 
-                : "bg-blue-600 text-white hover:bg-blue-700 shadow-lg shadow-blue-600/20"
+          <div className="flex items-center gap-2">
+            {!botState.isConnected ? (
+              <button 
+                onClick={connectToDeriv}
+                className="flex items-center gap-2 px-4 py-1.5 bg-emerald-600 text-white rounded-md text-xs font-bold uppercase tracking-widest hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-600/20"
+              >
+                <Zap className="w-3 h-3" />
+                Connect
+              </button>
+            ) : (
+              <button 
+                onClick={toggleTrading}
+                className={cn(
+                  "flex items-center gap-2 px-4 py-1.5 rounded-md text-xs font-bold transition-all uppercase tracking-widest",
+                  botState.isTrading 
+                    ? "bg-red-500/10 text-red-500 border border-red-500/20 hover:bg-red-500/20" 
+                    : "bg-blue-600 text-white hover:bg-blue-700 shadow-lg shadow-blue-600/20"
+                )}
+              >
+                {botState.isTrading ? <Square className="w-3 h-3 fill-current" /> : <Play className="w-3 h-3 fill-current" />}
+                {botState.isTrading ? 'Stop Engine' : 'Start Engine'}
+              </button>
             )}
-          >
-            {botState.isTrading ? <Square className="w-3 h-3 fill-current" /> : <Play className="w-3 h-3 fill-current" />}
-            {botState.isTrading ? 'Stop Engine' : 'Start Engine'}
-          </button>
+            
+            <button 
+              onClick={() => setBotState(prev => ({ ...prev, isLocked: true }))}
+              className="p-2 bg-white/5 border border-white/10 rounded-md text-gray-500 hover:text-white transition-all"
+              title="Lock Application"
+            >
+              <Lock className="w-4 h-4" />
+            </button>
+          </div>
         </div>
       </header>
 
@@ -998,6 +1306,79 @@ export default function App() {
             )}
           </AnimatePresence>
 
+          {/* Add Account Modal */}
+          <AnimatePresence>
+            {showAddAccount && (
+              <motion.div 
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm"
+              >
+                <motion.div 
+                  initial={{ scale: 0.95, opacity: 0, y: 20 }}
+                  animate={{ scale: 1, opacity: 1, y: 0 }}
+                  exit={{ scale: 0.95, opacity: 0, y: 20 }}
+                  className="w-full max-w-md bg-[#111114] border border-white/10 rounded-2xl overflow-hidden shadow-2xl"
+                >
+                  <div className="p-6 border-b border-white/5 flex items-center justify-between">
+                    <h3 className="text-sm font-bold text-white uppercase tracking-widest">Add New Account</h3>
+                    <button onClick={() => setShowAddAccount(false)} className="p-1 hover:bg-white/5 rounded-lg transition-colors">
+                      <X className="w-4 h-4 text-gray-500" />
+                    </button>
+                  </div>
+                  <div className="p-6 space-y-4">
+                    <div className="space-y-2">
+                      <label className="text-[10px] text-gray-400 uppercase font-bold">Account Name</label>
+                      <input 
+                        type="text" 
+                        className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-2 text-xs text-white focus:border-blue-500/50 outline-none"
+                        placeholder="e.g. Main Real Account"
+                        value={newAccountData.name}
+                        onChange={e => setNewAccountData(prev => ({ ...prev, name: e.target.value }))}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-[10px] text-gray-400 uppercase font-bold">App ID</label>
+                      <input 
+                        type="text" 
+                        className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-2 text-xs text-white focus:border-blue-500/50 outline-none"
+                        placeholder="Deriv App ID"
+                        value={newAccountData.appId}
+                        onChange={e => setNewAccountData(prev => ({ ...prev, appId: e.target.value }))}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-[10px] text-gray-400 uppercase font-bold">API Token</label>
+                      <input 
+                        type="password" 
+                        className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-2 text-xs text-white focus:border-blue-500/50 outline-none"
+                        placeholder="Deriv API Token"
+                        value={newAccountData.apiToken}
+                        onChange={e => setNewAccountData(prev => ({ ...prev, apiToken: e.target.value }))}
+                      />
+                    </div>
+                  </div>
+                  <div className="p-6 bg-white/5 flex justify-end gap-3">
+                    <button onClick={() => setShowAddAccount(false)} className="px-4 py-2 text-xs font-bold text-gray-500 hover:text-white transition-colors">Cancel</button>
+                    <button 
+                      onClick={() => {
+                        if (newAccountData.name && newAccountData.appId && newAccountData.apiToken) {
+                          addAccount(newAccountData.name, newAccountData.appId, newAccountData.apiToken);
+                          setNewAccountData({ name: '', appId: '', apiToken: '' });
+                          setShowAddAccount(false);
+                        }
+                      }}
+                      className="px-6 py-2 text-xs font-bold bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                    >
+                      Add Account
+                    </button>
+                  </div>
+                </motion.div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
           {/* Confirmation Dialog */}
           <AnimatePresence>
             {confirmingOrder && (
@@ -1104,44 +1485,62 @@ export default function App() {
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
-                      <div className="relative group/symbol">
-                        <button className="flex items-center gap-2 px-3 py-1.5 bg-white/5 border border-white/10 rounded-lg text-[10px] font-bold text-white hover:bg-white/10 transition-all">
+                      <div className="relative">
+                        <button 
+                          onClick={() => setShowSymbolSelector(!showSymbolSelector)}
+                          className="flex items-center gap-2 px-3 py-1.5 bg-white/5 border border-white/10 rounded-lg text-[10px] font-bold text-white hover:bg-white/10 transition-all"
+                        >
                           <Globe className="w-3 h-3 text-blue-400" />
                           {botState.activeSymbol}
                           <ChevronDown className="w-3 h-3 text-gray-500" />
                         </button>
-                        <div className="absolute top-full left-0 mt-1 w-48 bg-[#111114] border border-white/10 rounded-xl shadow-2xl opacity-0 invisible group-hover/symbol:opacity-100 group-hover/symbol:visible transition-all z-50 overflow-hidden">
-                          {Object.keys(botState.instrumentConfigs).map(symbol => (
-                            <button
-                              key={symbol}
-                              onClick={() => {
-                                const config = botState.instrumentConfigs[symbol];
-                                if (botState.isConnected && derivServiceRef.current) {
-                                  derivServiceRef.current.unsubscribeTicks(botState.activeSymbol);
-                                  derivServiceRef.current.fetchHistory(symbol, 50);
-                                  derivServiceRef.current.subscribeTicks(symbol);
-                                }
-                                setBotState(prev => ({ ...prev, activeSymbol: symbol }));
-                                if (config) {
-                                  setManualOrder(prev => ({
-                                    ...prev,
-                                    lotSize: config.fixedLotSize,
-                                    stopLoss: 0, // Reset to use config default if not manually set
-                                    takeProfit: 0
-                                  }));
-                                }
-                              }}
-                              className={cn(
-                                "w-full text-left px-4 py-2.5 text-[10px] font-bold transition-colors border-b border-white/5 last:border-0",
-                                botState.activeSymbol === symbol 
-                                  ? "bg-blue-600/10 text-blue-400" 
-                                  : "text-gray-400 hover:text-white hover:bg-white/5"
-                              )}
-                            >
-                              {symbol}
-                            </button>
-                          ))}
-                        </div>
+                        
+                        <AnimatePresence>
+                          {showSymbolSelector && (
+                            <>
+                              <div className="fixed inset-0 z-40" onClick={() => setShowSymbolSelector(false)} />
+                              <motion.div 
+                                initial={{ opacity: 0, y: 10 }}
+                                animate={{ opacity: 1, y: 0 }}
+                                exit={{ opacity: 0, y: 10 }}
+                                className="absolute top-full left-0 mt-2 w-48 bg-[#111114] border border-white/10 rounded-xl shadow-2xl z-50 overflow-hidden"
+                              >
+                                {Object.keys(botState.instrumentConfigs).map(symbol => (
+                                  <button
+                                    key={symbol}
+                                    onClick={() => {
+                                      const config = botState.instrumentConfigs[symbol];
+                                      if (botState.isConnected && derivServiceRef.current) {
+                                        derivServiceRef.current.unsubscribeTicks(botState.activeSymbol);
+                                        derivServiceRef.current.fetchHistory(symbol, 50);
+                                        derivServiceRef.current.subscribeTicks(symbol);
+                                      }
+                                      setBotState(prev => ({ ...prev, activeSymbol: symbol }));
+                                      setShowSymbolSelector(false);
+                                      if (config) {
+                                        setManualOrder(prev => ({
+                                          ...prev,
+                                          lotSize: config.fixedLotSize,
+                                          stopLoss: 0,
+                                          takeProfit: 0
+                                        }));
+                                      }
+                                      addLog(`Market switched to ${symbol}`, 'info');
+                                    }}
+                                    className={cn(
+                                      "w-full text-left px-4 py-2.5 text-[10px] font-bold transition-colors border-b border-white/5 last:border-0",
+                                      botState.activeSymbol === symbol 
+                                        ? "bg-blue-600/10 text-blue-400" 
+                                        : "text-gray-400 hover:text-white hover:bg-white/5"
+                                    )}
+                                  >
+                                    {symbol}
+                                  </button>
+                                ))}
+                              </motion.div>
+                            </>
+                          )}
+                        </AnimatePresence>
                       </div>
                     </div>
                   </div>
@@ -1239,7 +1638,19 @@ export default function App() {
                             </td>
                             <td className="px-4 py-3 font-mono">{trade.entryPrice.toFixed(2)}</td>
                             <td className="px-4 py-3 font-mono text-gray-500">
-                              <span className="text-red-400/70">{trade.stopLoss}</span> / <span className="text-emerald-400/70">{trade.takeProfit}</span>
+                              <div className="flex items-center gap-2">
+                                <span className="text-red-400/70">{trade.stopLoss}</span> / <span className="text-emerald-400/70">{trade.takeProfit}</span>
+                                <button 
+                                  onClick={() => {
+                                    setEditingTradeId(trade.id);
+                                    setEditSL(trade.stopLoss);
+                                    setEditTP(trade.takeProfit);
+                                  }}
+                                  className="p-1 hover:bg-white/5 rounded text-gray-600 hover:text-blue-400 transition-colors"
+                                >
+                                  <Edit2 className="w-3 h-3" />
+                                </button>
+                              </div>
                             </td>
                             <td className={cn("px-4 py-3 font-mono font-bold", trade.pnl >= 0 ? "text-emerald-400" : "text-red-400")}>
                               {trade.pnl >= 0 ? '+' : ''}{trade.pnl.toFixed(2)}
@@ -1579,6 +1990,58 @@ export default function App() {
                       </ResponsiveContainer>
                     </div>
                   </div>
+
+                  <div className="p-6 bg-[#0d0d0f] border border-white/5 rounded-2xl space-y-4">
+                    <h3 className="text-xs font-bold text-white uppercase tracking-widest flex items-center gap-2">
+                      <Brain className="w-4 h-4 text-emerald-500" />
+                      Performance & Learning
+                    </h3>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                      <div className="p-3 bg-white/5 border border-white/5 rounded-xl text-center">
+                        <div className="text-[9px] text-gray-500 uppercase font-bold">Total Trades</div>
+                        <div className="text-lg font-bold text-white">{currentEngine.getPerformance().totalTrades}</div>
+                      </div>
+                      <div className="p-3 bg-white/5 border border-white/5 rounded-xl text-center">
+                        <div className="text-[9px] text-gray-500 uppercase font-bold">Win Rate</div>
+                        <div className="text-lg font-bold text-emerald-400">{currentEngine.getPerformance().winRate.toFixed(1)}%</div>
+                      </div>
+                      <div className="p-3 bg-white/5 border border-white/5 rounded-xl text-center">
+                        <div className="text-[9px] text-gray-500 uppercase font-bold">Consec. Losses</div>
+                        <div className="text-lg font-bold text-red-400">{currentEngine.getPerformance().consecutiveLosses}</div>
+                      </div>
+                      <div className="p-3 bg-white/5 border border-white/5 rounded-xl text-center">
+                        <div className="text-[9px] text-gray-500 uppercase font-bold">Learning Status</div>
+                        <div className="text-[10px] font-bold text-blue-400 uppercase">Active</div>
+                      </div>
+                    </div>
+                    
+                    <div className="space-y-3 pt-2">
+                      <div className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">AI Parameter Adjustments</div>
+                      <div className="space-y-2">
+                        {currentEngine.getAdjustments().length === 0 ? (
+                          <div className="text-[10px] text-gray-600 italic">No adjustments made yet. The bot is currently collecting data.</div>
+                        ) : (
+                          currentEngine.getAdjustments().map((adj, i) => (
+                            <div key={i} className="flex items-center justify-between p-3 bg-white/5 border border-white/5 rounded-xl">
+                              <div className="flex items-center gap-3">
+                                <div className={cn(
+                                  "p-1.5 rounded-lg",
+                                  adj.change === 'increased' ? "bg-emerald-500/10 text-emerald-500" : "bg-blue-500/10 text-blue-500"
+                                )}>
+                                  {adj.change === 'increased' ? <TrendingUp className="w-3.5 h-3.5" /> : <TrendingDown className="w-3.5 h-3.5" />}
+                                </div>
+                                <div>
+                                  <div className="text-[11px] font-bold text-white">{adj.parameter}</div>
+                                  <div className="text-[9px] text-gray-500">{adj.change.toUpperCase()} to {adj.value.toFixed(2)}</div>
+                                </div>
+                              </div>
+                              <div className="text-[9px] text-gray-600 font-mono">{format(adj.time, 'HH:mm:ss')}</div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  </div>
                 </div>
 
                 {/* Structure List */}
@@ -1754,12 +2217,7 @@ export default function App() {
                   <p className="text-sm text-gray-500">Add and manage multiple accounts for simultaneous copy-trading.</p>
                 </div>
                 <button 
-                  onClick={() => {
-                    const name = prompt('Account Name:');
-                    const appId = prompt('App ID:');
-                    const apiToken = prompt('API Token:');
-                    if (name && appId && apiToken) addAccount(name, appId, apiToken);
-                  }}
+                  onClick={() => setShowAddAccount(true)}
                   className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-xl text-xs font-bold uppercase tracking-widest hover:bg-blue-700 transition-all shadow-lg shadow-blue-600/20"
                 >
                   <Plus className="w-4 h-4" />
@@ -2343,6 +2801,102 @@ export default function App() {
           <span>© 2026 AI ARCHITECT</span>
         </div>
       </footer>
+
+      {/* SL/TP Edit Modal */}
+      <AnimatePresence>
+        {editingTradeId && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm"
+          >
+            <motion.div 
+              initial={{ scale: 0.95, opacity: 0, y: 20 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.95, opacity: 0, y: 20 }}
+              className="w-full max-w-sm bg-[#111114] border border-white/10 rounded-2xl overflow-hidden shadow-2xl"
+            >
+              <div className="p-6 border-b border-white/5 flex items-center justify-between">
+                <h3 className="text-sm font-bold text-white uppercase tracking-widest">Modify SL/TP</h3>
+                <button onClick={() => setEditingTradeId(null)} className="p-1 hover:bg-white/5 rounded-lg transition-colors">
+                  <X className="w-4 h-4 text-gray-500" />
+                </button>
+              </div>
+              <div className="p-6 space-y-4">
+                <div className="space-y-2">
+                  <label className="text-[10px] text-gray-400 uppercase font-bold">Stop Loss</label>
+                  <input 
+                    type="number" 
+                    className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-2 text-xs text-white focus:border-blue-500/50 outline-none"
+                    value={editSL}
+                    onChange={e => setEditSL(parseFloat(e.target.value))}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-[10px] text-gray-400 uppercase font-bold">Take Profit</label>
+                  <input 
+                    type="number" 
+                    className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-2 text-xs text-white focus:border-blue-500/50 outline-none"
+                    value={editTP}
+                    onChange={e => setEditTP(parseFloat(e.target.value))}
+                  />
+                </div>
+              </div>
+              <div className="p-6 bg-white/5 flex justify-end gap-3">
+                <button onClick={() => setEditingTradeId(null)} className="px-4 py-2 text-xs font-bold text-gray-500 hover:text-white transition-colors">Cancel</button>
+                <button 
+                  onClick={() => setShowEditConfirm(true)}
+                  className="px-6 py-2 text-xs font-bold bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                >
+                  Save Changes
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* SL/TP Confirmation Dialog */}
+      <AnimatePresence>
+        {showEditConfirm && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/90 backdrop-blur-md"
+          >
+            <motion.div 
+              initial={{ scale: 0.95, opacity: 0, y: 20 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.95, opacity: 0, y: 20 }}
+              className="w-full max-w-xs bg-[#111114] border border-white/10 rounded-2xl overflow-hidden shadow-2xl p-6 text-center space-y-4"
+            >
+              <div className="w-12 h-12 rounded-full bg-blue-500/10 text-blue-500 flex items-center justify-center mx-auto">
+                <AlertTriangle className="w-6 h-6" />
+              </div>
+              <h4 className="text-sm font-bold text-white uppercase tracking-widest">Confirm Changes</h4>
+              <p className="text-xs text-gray-500">Are you sure you want to update the Stop Loss and Take Profit levels for this trade?</p>
+              <div className="flex gap-3 pt-2">
+                <button onClick={() => setShowEditConfirm(false)} className="flex-1 py-2 text-xs font-bold text-gray-500 hover:text-white transition-colors">No, Cancel</button>
+                <button 
+                  onClick={() => {
+                    if (editingTradeId) {
+                      setTrades(prev => prev.map(t => t.id === editingTradeId ? { ...t, stopLoss: editSL, takeProfit: editTP } : t));
+                      addLog(`Updated SL/TP for trade ${editingTradeId.slice(0, 4)}...`, 'info');
+                      setEditingTradeId(null);
+                      setShowEditConfirm(false);
+                    }
+                  }}
+                  className="flex-1 py-2 text-xs font-bold bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                >
+                  Yes, Apply
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

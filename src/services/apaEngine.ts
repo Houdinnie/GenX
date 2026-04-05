@@ -10,6 +10,13 @@ export class APAEngine {
   private breaks: StructureBreak[] = [];
   private atr: number = 0;
   private analysis: MarketAnalysis | null = null;
+  private performance = {
+    totalTrades: 0,
+    winRate: 0,
+    profitFactor: 1.0,
+    consecutiveLosses: 0
+  };
+  private adjustments: { parameter: string, value: number, change: string, time: number }[] = [];
   
   constructor(private symbol: string, private config?: InstrumentConfig) {}
 
@@ -22,6 +29,8 @@ export class APAEngine {
     this.scanOrderBlocks();
     this.runAdvancedAnalysis();
   }
+
+  public getAdjustments() { return this.adjustments; }
 
   private calculateATR() {
     if (this.candles.length < 14) return;
@@ -190,4 +199,62 @@ export class APAEngine {
   public getAnalysis() { return this.analysis; }
   public getOrderBlocks() { return this.orderBlocks; }
   public getBreaks() { return this.breaks; }
+  public getPerformance() { return this.performance; }
+
+  /**
+   * Learning mechanism: Adjusts internal parameters based on trade outcomes
+   */
+  public learn(trade: { type: 'buy' | 'sell', entryPrice: number, exitPrice: number, pnl: number }) {
+    if (!this.config) return;
+
+    this.performance.totalTrades++;
+    const isProfit = trade.pnl > 0;
+    
+    // Update win rate
+    const wins = Math.round(this.performance.winRate * (this.performance.totalTrades - 1) / 100) + (isProfit ? 1 : 0);
+    this.performance.winRate = (wins / this.performance.totalTrades) * 100;
+
+    // Update consecutive losses
+    if (!isProfit) {
+      this.performance.consecutiveLosses++;
+    } else {
+      this.performance.consecutiveLosses = 0;
+    }
+
+    const adjustmentFactor = isProfit ? 0.05 : -0.1; // Be more aggressive on losses to correct
+
+    // Adjust ATR multiplier for spike detection
+    const oldSpikeThreshold = this.config.spikeThresholdATR;
+    if (!isProfit) {
+      this.config.spikeThresholdATR = Math.max(1.5, this.config.spikeThresholdATR * (1 - adjustmentFactor));
+    } else {
+      this.config.spikeThresholdATR = Math.min(5.0, this.config.spikeThresholdATR * (1 + adjustmentFactor));
+    }
+    
+    if (this.config.spikeThresholdATR !== oldSpikeThreshold) {
+      this.adjustments.push({
+        parameter: 'spikeThresholdATR',
+        value: this.config.spikeThresholdATR,
+        change: this.config.spikeThresholdATR > oldSpikeThreshold ? 'increased' : 'decreased',
+        time: Date.now()
+      });
+    }
+
+    // Adjust risk parameters if needed (simplified)
+    const oldSL = this.config.stopLossPips;
+    if (!isProfit && trade.pnl < -100) {
+      this.config.stopLossPips = Math.round(this.config.stopLossPips * 1.1);
+    }
+    
+    if (this.config.stopLossPips !== oldSL) {
+      this.adjustments.push({
+        parameter: 'stopLossPips',
+        value: this.config.stopLossPips,
+        change: 'increased',
+        time: Date.now()
+      });
+    }
+    
+    if (this.adjustments.length > 10) this.adjustments.shift();
+  }
 }
