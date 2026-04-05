@@ -50,6 +50,7 @@ export interface Trade {
   openTime: number;
   closeTime?: number;
   tpAlertEnabled?: boolean;
+  summary?: string;
 }
 
 export interface RiskSettings {

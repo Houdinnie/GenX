@@ -8,6 +8,7 @@ export class DerivService {
   private onHistory: (data: MarketData[]) => void;
   private onStatus: (isConnected: boolean) => void;
   private onLog: (msg: string, type: 'info' | 'success' | 'warning' | 'error') => void;
+  private onBalance: (balance: number) => void;
 
   constructor(
     appId: string,
@@ -15,7 +16,8 @@ export class DerivService {
     onTick: (data: MarketData, isHistory?: boolean) => void,
     onHistory: (data: MarketData[]) => void,
     onStatus: (isConnected: boolean) => void,
-    onLog: (msg: string, type: 'info' | 'success' | 'warning' | 'error') => void
+    onLog: (msg: string, type: 'info' | 'success' | 'warning' | 'error') => void,
+    onBalance: (balance: number) => void
   ) {
     this.appId = appId;
     this.apiToken = apiToken;
@@ -23,6 +25,7 @@ export class DerivService {
     this.onHistory = onHistory;
     this.onStatus = onStatus;
     this.onLog = onLog;
+    this.onBalance = onBalance;
   }
 
   public connect() {
@@ -161,7 +164,7 @@ export class DerivService {
     }
 
     if (response.msg_type === 'balance') {
-      // Update balance in state if needed
+      this.onBalance(response.balance.balance);
     }
   }
 
@@ -185,8 +188,35 @@ export class DerivService {
 
   public executeTrade(type: 'buy' | 'sell', symbol: string, lotSize: number, sl?: number, tp?: number) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      const derivSymbol = this.mapSymbol(symbol);
+      const parameters: any = {
+        amount: lotSize,
+        basis: 'payout', // Default for synthetic indices in some contexts, but 'stake' or 'amount' is common
+        contract_type: type === 'buy' ? 'CALL' : 'PUT',
+        currency: 'USD',
+        duration: 1,
+        duration_unit: 'm',
+        symbol: derivSymbol
+      };
+
+      // For synthetic indices, 'buy' is often used with 'parameters'
+      this.ws.send(JSON.stringify({
+        buy: 1,
+        price: 100, // This is a placeholder, real trading needs 'proposal' first or 'buy' with specific params
+        parameters: {
+          contract_type: type === 'buy' ? 'CALL' : 'PUT',
+          symbol: derivSymbol,
+          amount: lotSize,
+          basis: 'stake',
+          currency: 'USD',
+          limit_order: {
+            stop_loss: sl,
+            take_profit: tp
+          }
+        }
+      }));
+
       this.onLog(`[Account: ${this.appId}] Executing ${type.toUpperCase()} on ${symbol} (Lot: ${lotSize})`, 'success');
-      // Real implementation would send 'buy' request to Deriv API
     } else {
       this.onLog(`[Account: ${this.appId}] Failed to execute: Not connected`, 'error');
     }

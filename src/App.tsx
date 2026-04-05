@@ -53,6 +53,7 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { format } from 'date-fns';
 import { cn } from './lib/utils';
+import { GoogleGenAI } from "@google/genai";
 import { MarketData, Trade, BotState, RiskSettings, OrderBlock, StructureBreak, SymbolInfo, InstrumentConfig, Account } from './types';
 import { APAEngine } from './services/apaEngine';
 import { DerivService } from './services/derivService';
@@ -291,6 +292,42 @@ export default function App() {
     return Math.max(symbolInfo.minVolume, Math.min(symbolInfo.maxVolume, Number(lot.toFixed(2))));
   }, [botState.equity, riskParams, symbolInfo, marketData, botState.activeSymbol, botState.instrumentConfigs]);
 
+  const generateTradeSummary = async (trade: Trade) => {
+    if (!process.env.GEMINI_API_KEY) return "Summary unavailable (API Key missing).";
+    
+    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    const prompt = `Summarize this completed trade in one concise sentence:
+    Symbol: ${trade.symbol}
+    Type: ${trade.type}
+    Entry: ${trade.entryPrice}
+    Exit: ${trade.exitPrice}
+    PnL: ${trade.pnl.toFixed(2)}
+    Reason for closing: ${trade.pnl > 0 ? 'Take Profit' : 'Stop Loss'}
+    Highlight the key factors like entry/exit points and PnL.`;
+
+    try {
+      const response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: prompt,
+      });
+      return response.text?.trim() || "Summary unavailable.";
+    } catch (error) {
+      console.error("Gemini Error:", error);
+      return "Failed to generate summary.";
+    }
+  };
+
+  // Generate summaries for existing closed trades that don't have one
+  useEffect(() => {
+    const tradesToSummarize = trades.filter(t => t.status === 'closed' && !t.summary);
+    if (tradesToSummarize.length > 0) {
+      tradesToSummarize.forEach(async (t) => {
+        const summary = await generateTradeSummary(t);
+        setTrades(prev => prev.map(pt => pt.id === t.id ? { ...pt, summary } : pt));
+      });
+    }
+  }, [trades]);
+
   const addLog = useCallback((msg: string, type: 'info' | 'success' | 'warning' | 'error' = 'info') => {
     setLogs(prev => [{ time: format(new Date(), 'HH:mm:ss'), msg, type }, ...prev].slice(0, 50));
   }, []);
@@ -380,12 +417,17 @@ export default function App() {
           const slReached = t.type === 'buy' ? currentPrice <= t.stopLoss : currentPrice >= t.stopLoss;
 
           if (tpReached || slReached) {
-            if (tpReached && t.tpAlertEnabled) {
-              hits.push({ id: t.id, reason: 'Take Profit', pnl });
-            } else if (slReached) {
-              hits.push({ id: t.id, reason: 'Stop Loss', pnl });
-            }
-            return { ...t, pnl, status: 'closed', exitPrice: currentPrice, closeTime: Date.now() };
+            const reason = tpReached ? 'Take Profit' : 'Stop Loss';
+            hits.push({ id: t.id, reason, pnl });
+            
+            const closedTrade: Trade = { ...t, pnl, status: 'closed', exitPrice: currentPrice, closeTime: Date.now() };
+            
+            // Generate AI Summary asynchronously
+            generateTradeSummary(closedTrade).then(summary => {
+              setTrades(currentTrades => currentTrades.map(ct => ct.id === t.id ? { ...ct, summary } : ct));
+            });
+
+            return closedTrade;
           }
           return { ...t, pnl };
         });
@@ -394,7 +436,10 @@ export default function App() {
           hits.forEach(hit => {
             addLog(`${hit.reason} hit for trade ${hit.id}. PnL: ${hit.pnl.toFixed(2)}`, hit.reason === 'Take Profit' ? 'success' : 'error');
             if (botState.soundEnabled) {
-              const audio = new Audio('https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3');
+              const soundUrl = hit.reason === 'Take Profit' 
+                ? 'https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3'
+                : 'https://assets.mixkit.co/active_storage/sfx/2571/2571-preview.mp3';
+              const audio = new Audio(soundUrl);
               audio.play().catch(() => {});
             }
           });
@@ -510,12 +555,21 @@ export default function App() {
     const currentPrice = marketData[marketData.length - 1]?.price || 0;
     setTrades(prev => prev.map(t => {
       if (t.id === tradeId && t.status === 'open') {
-        return {
+        const pnl = t.type === 'buy' ? (currentPrice - t.entryPrice) * 0.001 : (t.entryPrice - currentPrice) * 0.001;
+        const closedTrade: Trade = {
           ...t,
           status: 'closed',
           exitPrice: currentPrice,
-          closeTime: Date.now()
+          closeTime: Date.now(),
+          pnl
         };
+        
+        // Generate AI Summary asynchronously
+        generateTradeSummary(closedTrade).then(summary => {
+          setTrades(currentTrades => currentTrades.map(ct => ct.id === t.id ? { ...ct, summary } : ct));
+        });
+
+        return closedTrade;
       }
       return t;
     }));
@@ -684,7 +738,8 @@ export default function App() {
       handleDerivTick,
       handleDerivHistory,
       handleDerivStatus,
-      addLog
+      addLog,
+      (balance) => setBotState(prev => ({ ...prev, balance, equity: balance }))
     );
     derivServiceRef.current.connect();
     derivServiceRef.current.fetchHistory(botState.activeSymbol, 50);
@@ -703,7 +758,13 @@ export default function App() {
             accounts: prev.accounts.map(a => a.id === acc.id ? { ...a, status: isConnected ? 'connected' : 'disconnected' } : a)
           }));
         },
-        (msg, type) => addLog(`[${acc.name}] ${msg}`, type)
+        (msg, type) => addLog(`[${acc.name}] ${msg}`, type),
+        (balance) => {
+          setBotState(prev => ({
+            ...prev,
+            accounts: prev.accounts.map(a => a.id === acc.id ? { ...a, balance } : a)
+          }));
+        }
       );
       service.connect();
       accountServicesRef.current[acc.id] = service;
@@ -2176,6 +2237,12 @@ export default function App() {
                         <td className="px-6 py-4">
                           <div className="font-bold text-white">{trade.symbol}</div>
                           <div className="text-[9px] text-gray-500 font-mono">ID: {trade.id}</div>
+                          {trade.summary && (
+                            <div className="mt-2 text-[10px] text-blue-400/80 italic max-w-md leading-relaxed">
+                              <Brain className="w-3 h-3 inline mr-1 opacity-50" />
+                              {trade.summary}
+                            </div>
+                          )}
                         </td>
                         <td className="px-6 py-4">
                           <span className={cn(
