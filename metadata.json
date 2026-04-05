@@ -1,0 +1,5 @@
+{
+  "name": "Apex-Syn Quant Terminal",
+  "description": "Advanced Price Action (APA) trading engine for Deriv Synthetic Indices with real-time market structure mapping and dynamic risk management.",
+  "requestFramePermissions": []
+}
