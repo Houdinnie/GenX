@@ -1,7 +1,3 @@
-<div align="center">
-<img width="1200" height="475" alt="GenX Trading Dashboard" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
-
 # GenX Trading Dashboard
 
 A sophisticated automated trading dashboard for Deriv.com, featuring Advanced Price Action (APA) analysis, real-time market data, and intelligent trade execution.
@@ -108,7 +104,7 @@ src/
 ## API Keys
 
 ### Gemini API
-Required for AI-powered trade summaries. Get a key at [Google AI Studio](https://aistudio.google.com/).
+Required for AI-powered trade summaries. Get your key from [Google AI](https://aistudio.google.com/).
 
 ### Deriv API
 Required for live trading. Get your API token from [Deriv > Settings > API](https://app.deriv.com).
@@ -143,6 +139,7 @@ Required for live trading. Get your API token from [Deriv > Settings > API](http
 - **Recharts** - Charting library
 - **Motion** - Animations
 - **Lucide** - Icons
+- **Google Gemini** - AI-powered trade summaries
 
 ## License
 
