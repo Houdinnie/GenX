@@ -98,6 +98,17 @@ New `BacktestResult` type includes:
 
 ---
 
+## 5. Documentation
+- Rewrote README.md with proper project description
+- Added features overview, supported instruments table
+- Added setup instructions with prerequisites
+- Added configuration guide for API keys
+- Added project structure diagram
+- Added development scripts reference
+- Added tech stack listing
+
+---
+
 ## Files Changed
 
 | File | Change |
