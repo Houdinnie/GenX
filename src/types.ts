@@ -1,3 +1,11 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * Core Market Data Types
+ */
 export interface MarketData {
   symbol: string;
   price: number;
@@ -9,6 +17,9 @@ export interface MarketData {
   spread: number;
 }
 
+/**
+ * Symbol Configuration
+ */
 export interface SymbolInfo {
   symbol: string;
   point: number;
@@ -18,6 +29,9 @@ export interface SymbolInfo {
   spread: number;
 }
 
+/**
+ * Order Block - Areas of institutional trading activity
+ */
 export interface OrderBlock {
   id: string;
   type: 'supply' | 'demand';
@@ -28,6 +42,9 @@ export interface OrderBlock {
   strength: number;
 }
 
+/**
+ * Structure Break - BOS (Break of Structure) or ChoCh (Change of Character)
+ */
 export interface StructureBreak {
   id: string;
   type: 'BOS' | 'ChoCh';
@@ -36,6 +53,9 @@ export interface StructureBreak {
   time: number;
 }
 
+/**
+ * Trade - Represents an individual trade position
+ */
 export interface Trade {
   id: string;
   symbol: string;
@@ -53,6 +73,9 @@ export interface Trade {
   summary?: string;
 }
 
+/**
+ * Risk Management Settings
+ */
 export interface RiskSettings {
   riskPercentage: number;
   maxDailyDrawdown: number;
@@ -60,13 +83,15 @@ export interface RiskSettings {
   trailingStop: boolean;
 }
 
+/**
+ * Instrument Configuration - Per-symbol trading parameters
+ */
 export interface InstrumentConfig {
   symbol: string;
   isCrashBoom: boolean;
-  spikeThresholdATR: number; // N in "range > N x ATR"
+  spikeThresholdATR: number;
   disableBOSOnSpikes: boolean;
   gapProtectionMultiplier: number;
-  // Risk Profile
   riskPercentage: number;
   stopLossPips: number;
   takeProfitPips: number;
@@ -74,6 +99,9 @@ export interface InstrumentConfig {
   fixedLotSize: number;
 }
 
+/**
+ * Market Analysis Results from APA Engine
+ */
 export interface MarketAnalysis {
   linearRegression: { slope: number; intercept: number; r2: number };
   garch: { volatility: number; forecast: number };
@@ -84,6 +112,9 @@ export interface MarketAnalysis {
   neuralNetwork: { bias: 'bullish' | 'bearish' | 'neutral'; confidence: number };
 }
 
+/**
+ * Trading Account
+ */
 export interface Account {
   id: string;
   name: string;
@@ -94,6 +125,25 @@ export interface Account {
   status: 'connected' | 'disconnected' | 'error';
 }
 
+/**
+ * Performance Metrics for Learning System
+ */
+export interface PerformanceMetrics {
+  totalTrades: number;
+  winRate: number;
+  profitFactor: number;
+  consecutiveLosses: number;
+  sharpeRatio?: number;
+  sortinoRatio?: number;
+  maxDrawdown?: number;
+  maxFavorableExcursion?: number;
+  maxAdverseExcursion?: number;
+}
+
+/**
+ * Bot State - Complete application state
+ * FIXED: Added missing fields (activeAccountId, isLocked, pin)
+ */
 export interface BotState {
   isConnected: boolean;
   isTrading: boolean;
@@ -109,4 +159,57 @@ export interface BotState {
   accounts: Account[];
   soundEnabled: boolean;
   highPerformanceMode: boolean;
+  activeAccountId: string;
+  isLocked: boolean;
+  pin: string;
+}
+
+/**
+ * Backtest Results
+ */
+export interface BacktestResult {
+  id: string;
+  symbol: string;
+  startDate: number;
+  endDate: number;
+  initialBalance: number;
+  finalBalance: number;
+  totalTrades: number;
+  winRate: number;
+  profitFactor: number;
+  maxDrawdown: number;
+  sharpeRatio?: number;
+  sortinoRatio?: number;
+  equityCurve: { time: number; equity: number }[];
+  trades: Trade[];
+}
+
+/**
+ * Log Entry
+ */
+export interface LogEntry {
+  time: string;
+  msg: string;
+  type: 'info' | 'success' | 'warning' | 'error';
+}
+
+/**
+ * Notification Settings
+ */
+export interface NotificationSettings {
+  tradeAlerts: boolean;
+  balanceChanges: boolean;
+  connectionIssues: boolean;
+  marketMovements: boolean;
+  strategySignals: boolean;
+}
+
+/**
+ * APA Engine Adjustment Record
+ */
+export interface APAAdjustment {
+  parameter: string;
+  value: number;
+  change: string;
+  time: number;
 }
